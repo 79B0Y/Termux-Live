@@ -136,3 +136,78 @@
 *   **不同设备差异**: 不同安卓版本和厂商定制ROM的行为差异很大，可能需要尝试多种方法。
 
 先从最简单的方法开始尝试，逐步增加强度，看看哪种最适合你的情况。
+
+
+是的，**每次进程启动时都需要重新设置 `oom_score_adj`**。
+
+`oom_score_adj` 是一个与特定**进程ID (PID)** 关联的属性。当你写入 `/proc/<PID>/oom_score_adj` 时，你修改的是当前具有该PID的正在运行的进程的这个值。
+
+**原因如下：**
+
+1.  **进程生命周期**: 当一个进程结束（无论是正常退出还是被杀死），它的PID会被释放，并且所有与该PID相关的 `/proc` 条目（包括 `oom_score_adj`）都会消失。
+2.  **新进程新PID**: 当你重新启动同一个应用程序时，操作系统会为它分配一个新的PID。这个新进程会以默认的 `oom_score_adj` 值（通常是0，或者从其父进程继承）开始，除非你再次手动修改它。
+
+**如何实现自动设置？**
+
+因为需要每次启动都设置，所以你需要一种自动化的方法：
+
+*   **启动脚本**: 这是最常见和推荐的方法。创建一个脚本，该脚本负责：
+    1.  启动你的目标应用程序（通常在后台运行）。
+    2.  获取该应用程序的PID。
+    3.  使用 `su` (如果脚本不是以root身份直接运行) 来修改新进程的 `oom_score_adj`。
+
+    **示例脚本 (假设你的应用叫 `my_app`)**:
+    ```bash
+    #!/data/data/com.termux/files/usr/bin/bash
+
+    # 启动你的应用，并将其置于后台
+    /path/to/your/my_app &
+
+    # 获取后台进程的PID
+    APP_PID=$!
+
+    echo "my_app started with PID: $APP_PID"
+
+    # 等待一小会儿，确保进程完全初始化 (可选，但有时有帮助)
+    sleep 1
+
+    # 以root权限修改 oom_score_adj
+    # 如果你已经是root用户运行此脚本，可以直接 echo
+    # 否则，你需要 su -c "..."
+    if [ "$(id -u)" -eq 0 ]; then
+        echo -800 > "/proc/$APP_PID/oom_score_adj"
+        echo "Set oom_score_adj for PID $APP_PID to -800"
+    else
+        # 提示：确保你的 su 实现支持这种方式传递命令
+        # 或者你可以在 su shell 中直接运行这个脚本或命令
+        # 更可靠的方式是，先 su，然后在 root shell 里运行这个脚本/命令
+        echo "Attempting to set oom_score_adj with su. You might need to run this script as root."
+        su -c "echo -800 > /proc/$APP_PID/oom_score_adj"
+        # 检查是否成功 (可选)
+        # su -c "cat /proc/$APP_PID/oom_score_adj"
+    fi
+
+    # （可选）让脚本等待应用结束，如果你希望脚本在前台保持
+    # wait $APP_PID
+    ```
+    然后你可以这样运行脚本 (如果你脚本本身没有处理root权限，需要先 `su`):
+    `su`
+    `sh /path/to/your/startup_script.sh`
+
+    或者，如果脚本内部有 `su -c` (如上例)，可以直接运行，但它会提示输入root密码（如果 `su` 配置为这样）或者如果 `su` 允许无密码执行特定命令则直接执行。在Termux中，`su` 通常会直接切换到root shell。
+
+*   **`termux-services`**: 如果你的应用适合作为服务运行，`termux-services` 的 `run` 脚本是放置这个逻辑的好地方。`run` 脚本本身就是用来启动服务的，你可以在启动命令之后添加修改 `oom_score_adj` 的代码。由于 `termux-services` 的守护进程 (runit) 可能以 Termux 用户身份运行，你仍然需要在 `run` 脚本中针对你的服务进程使用 `su -c` 来修改 `oom_score_adj`。
+
+    例如，在 `~/.termux/service/my_service/run` 文件中：
+    ```sh
+    #!/data/data/com.termux/files/usr/bin/sh
+    # exec /path/to/your/my_app_daemon # 假设这是你的服务启动命令
+    # ... (服务启动后)
+    # PID_OF_SERVICE=$(pgrep -f my_app_daemon) # 获取PID的方法可能需要调整
+    # su -c "echo -800 > /proc/$PID_OF_SERVICE/oom_score_adj"
+    ```
+    这部分会比较复杂，因为服务启动方式多样，获取守护进程的准确PID可能需要技巧。
+
+**总结：**
+
+是的，`oom_score_adj` 是临时的，与进程绑定。你需要通过脚本或其他自动化方式，在每次目标进程启动后为其设置所需的值。
